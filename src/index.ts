@@ -1,4 +1,4 @@
-// src/index.ts - Fixed Insurance MCP Server
+// src/index.ts - ES Module Compatible Insurance MCP Server
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
@@ -126,7 +126,7 @@ export class MyMCP extends McpAgent {
 
           const customers = await this.callNowCertsAPI('customers/search', searchParams);
           
-          // Enhance results with summary data
+          // Enhance results with summary data (limited to prevent timeouts)
           const enhancedResults = await Promise.all(
             (customers.data || []).slice(0, 10).map(async (customer) => {
               try {
@@ -242,231 +242,6 @@ export class MyMCP extends McpAgent {
       }
     );
 
-    this.server.tool(
-      "get_renewals_report",
-      "Generate renewals report with recommendations for upcoming policy renewals",
-      {
-        date_range: z.object({
-          from: z.string().describe("Start date (YYYY-MM-DD)"),
-          to: z.string().describe("End date (YYYY-MM-DD)")
-        }).describe("Renewal date range"),
-        policy_types: z.array(z.enum(["auto", "home", "life", "commercial", "umbrella"])).optional(),
-        include_recommendations: z.boolean().optional().describe("Include renewal recommendations"),
-        limit: z.number().optional().describe("Maximum policies to analyze (default: 50)")
-      },
-      async ({ date_range, policy_types, include_recommendations = true, limit = 50 }) => {
-        try {
-          // Get policies expiring in date range
-          const policies = await this.callNowCertsAPI('policies', {
-            expiration_date_from: date_range.from,
-            expiration_date_to: date_range.to,
-            status: 'active',
-            limit: Math.min(limit, 100)
-          });
-
-          let renewalData = policies.data || [];
-
-          // Filter by policy types if specified
-          if (policy_types && policy_types.length > 0) {
-            renewalData = renewalData.filter(p => policy_types.includes(p.type));
-          }
-
-          // Enhance with additional data
-          const enhancedRenewals = await Promise.all(
-            renewalData.slice(0, 20).map(async (policy) => {
-              const enhancement = {
-                ...policy,
-                customer_info: null,
-                claims_history: [],
-                renewal_recommendation: null
-              };
-
-              try {
-                // Get customer info
-                const customer = await this.callNowCertsAPI('customers', { customer_id: policy.customer_id });
-                enhancement.customer_info = customer.data;
-
-                // Get recent claims for risk analysis
-                const claims = await this.callNowCertsAPI('claims', { 
-                  policy_id: policy.id,
-                  date_from: this.getDateMonthsAgo(24), // 2 years
-                  limit: 5
-                });
-                enhancement.claims_history = claims.data || [];
-
-                // Generate renewal recommendations
-                if (include_recommendations) {
-                  enhancement.renewal_recommendation = this.generateRenewalRecommendation(policy, enhancement.claims_history);
-                }
-              } catch (error) {
-                console.log(`Error enhancing policy ${policy.id}:`, error.message);
-              }
-
-              return enhancement;
-            })
-          );
-
-          // Generate summary statistics
-          const summary = {
-            total_policies: enhancedRenewals.length,
-            total_premium: enhancedRenewals.reduce((sum, p) => sum + (p.premium_amount || 0), 0),
-            avg_premium: enhancedRenewals.length > 0 ? enhancedRenewals.reduce((sum, p) => sum + (p.premium_amount || 0), 0) / enhancedRenewals.length : 0,
-            retention_recommendations: enhancedRenewals.filter(p => p.renewal_recommendation?.action === 'retain').length
-          };
-
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Renewals Report (${date_range.from} to ${date_range.to}):\n\nSummary:\n${JSON.stringify(summary, null, 2)}\n\nDetailed Data:\n${JSON.stringify(enhancedRenewals, null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error generating renewals report: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
-    // ==== CLAIMS MANAGEMENT TOOLS ====
-
-    this.server.tool(
-      "get_claims_dashboard",
-      "Generate claims dashboard with analytics and trends",
-      {
-        date_range: z.object({
-          from: z.string().describe("Start date (YYYY-MM-DD)"),
-          to: z.string().describe("End date (YYYY-MM-DD)")
-        }).optional().describe("Claims date range (default: last 6 months)"),
-        status_filter: z.array(z.enum(["open", "closed", "pending", "denied"])).optional(),
-        claim_types: z.array(z.string()).optional().describe("Claim type filters"),
-        limit: z.number().optional().describe("Maximum claims to analyze (default: 100)")
-      },
-      async ({ date_range, status_filter, claim_types, limit = 100 }) => {
-        try {
-          // Default to last 6 months if no date range provided
-          const defaultRange = {
-            from: date_range?.from || this.getDateMonthsAgo(6),
-            to: date_range?.to || new Date().toISOString().split('T')[0]
-          };
-
-          // Get claims data
-          const claimsParams = {
-            date_from: defaultRange.from,
-            date_to: defaultRange.to,
-            limit: Math.min(limit, 200)
-          };
-
-          if (status_filter && status_filter.length > 0) {
-            claimsParams.status = status_filter.join(',');
-          }
-
-          const claims = await this.callNowCertsAPI('claims', claimsParams);
-          let claimsData = claims.data || [];
-
-          // Filter by claim types if specified
-          if (claim_types && claim_types.length > 0) {
-            claimsData = claimsData.filter(c => claim_types.includes(c.type));
-          }
-
-          const dashboard = {
-            summary: this.generateClaimsSummary(claimsData),
-            by_status: this.groupClaimsBy(claimsData, 'status'),
-            by_type: this.groupClaimsBy(claimsData, 'type'),
-            action_items: this.generateClaimsActionItems(claimsData),
-            date_range: defaultRange
-          };
-
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Claims Dashboard (${defaultRange.from} to ${defaultRange.to}):\n\n${JSON.stringify(dashboard, null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error generating claims dashboard: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
-    // ==== SALES & LEAD MANAGEMENT TOOLS ====
-
-    this.server.tool(
-      "get_sales_pipeline",
-      "Sales pipeline analysis with lead scoring and conversion tracking",
-      {
-        pipeline_stage: z.enum(["all", "new", "contacted", "quoted", "negotiating", "won", "lost"]).optional(),
-        date_range: z.object({
-          from: z.string().describe("Start date (YYYY-MM-DD)"),
-          to: z.string().describe("End date (YYYY-MM-DD)")
-        }).optional(),
-        include_lead_scoring: z.boolean().optional().describe("Include lead scoring analysis"),
-        limit: z.number().optional().describe("Maximum leads to analyze (default: 50)")
-      },
-      async ({ pipeline_stage = "all", date_range, include_lead_scoring = true, limit = 50 }) => {
-        try {
-          // Get leads from Close CRM
-          const leadsParams = {
-            _limit: Math.min(limit, 100)
-          };
-
-          if (date_range) {
-            leadsParams.date_created__gte = date_range.from;
-            leadsParams.date_created__lte = date_range.to;
-          }
-
-          const leads = await this.callCloseAPI('lead', leadsParams);
-          let leadsData = leads.data || [];
-
-          // Get opportunities for each lead (limited to prevent timeout)
-          const opportunities = await this.callCloseAPI('opportunity', { _limit: 100 });
-          const opportunitiesData = opportunities.data || [];
-
-          // Combine leads with their opportunities
-          const pipelineData = leadsData.slice(0, 25).map(lead => {
-            const leadOpportunities = opportunitiesData.filter(opp => opp.lead_id === lead.id);
-            
-            return {
-              ...lead,
-              opportunities: leadOpportunities,
-              total_opportunity_value: leadOpportunities.reduce((sum, opp) => sum + (opp.value || 0), 0),
-              lead_score: include_lead_scoring ? this.calculateLeadScore(lead, leadOpportunities) : null
-            };
-          });
-
-          // Generate analytics
-          const analytics = {
-            total_leads: pipelineData.length,
-            total_pipeline_value: pipelineData.reduce((sum, lead) => sum + lead.total_opportunity_value, 0),
-            avg_deal_size: pipelineData.length > 0 ? pipelineData.reduce((sum, lead) => sum + lead.total_opportunity_value, 0) / pipelineData.length : 0,
-            high_value_leads: pipelineData.filter(lead => lead.total_opportunity_value > 10000).length
-          };
-
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Sales Pipeline Analysis:\n\nAnalytics:\n${JSON.stringify(analytics, null, 2)}\n\nPipeline Data:\n${JSON.stringify(pipelineData, null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error generating sales pipeline: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
     // ==== BASIC NowCerts & Close CRM TOOLS ====
 
     this.server.tool(
@@ -505,17 +280,52 @@ export class MyMCP extends McpAgent {
     );
 
     this.server.tool(
+      "get_nowcerts_customers",
+      "Get customer details from NowCerts",
+      {
+        customer_id: z.string().optional().describe("Specific customer ID to retrieve"),
+        email: z.string().optional().describe("Customer email to search by"),
+        phone: z.string().optional().describe("Customer phone to search by"),
+        limit: z.number().optional().describe("Maximum number of customers to return (default: 10, max: 25)")
+      },
+      async ({ customer_id, email, phone, limit }) => {
+        try {
+          const result = await this.callNowCertsAPI('customers', {
+            customer_id,
+            email,
+            phone,
+            limit: Math.min(limit || 10, 25)
+          });
+          
+          return {
+            content: [{ 
+              type: "text", 
+              text: `Found ${result.data?.length || 0} customers:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{ 
+              type: "text", 
+              text: `Error retrieving customers: ${error.message}` 
+            }]
+          };
+        }
+      }
+    );
+
+    this.server.tool(
       "get_close_leads",
       "Retrieve lead information from Close CRM",
       {
         lead_id: z.string().optional().describe("Specific lead ID to retrieve"),
         status: z.enum(["active", "inactive"]).optional().describe("Lead status filter"),
-        limit: z.number().optional().describe("Maximum number of leads to return (default: 25, max: 50)")
+        limit: z.number().optional().describe("Maximum number of leads to return (default: 10, max: 25)")
       },
       async ({ lead_id, status, limit }) => {
         try {
           const params: any = {
-            _limit: Math.min(limit || 25, 50)
+            _limit: Math.min(limit || 10, 25)
           };
 
           if (lead_id) {
@@ -543,6 +353,53 @@ export class MyMCP extends McpAgent {
             content: [{ 
               type: "text", 
               text: `Error retrieving leads: ${error.message}` 
+            }]
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "get_close_contacts",
+      "Get contact details from Close CRM",
+      {
+        contact_id: z.string().optional().describe("Specific contact ID to retrieve"),
+        lead_id: z.string().optional().describe("Lead ID to get contacts for"),
+        email: z.string().optional().describe("Contact email to search by"),
+        limit: z.number().optional().describe("Maximum number of contacts to return (default: 10, max: 25)")
+      },
+      async ({ contact_id, lead_id, email, limit }) => {
+        try {
+          const params: any = {
+            _limit: Math.min(limit || 10, 25)
+          };
+
+          if (contact_id) {
+            const result = await this.callCloseAPI(`contact/${contact_id}`, {});
+            return {
+              content: [{ 
+                type: "text", 
+                text: `Contact details:\n\n${JSON.stringify(result, null, 2)}` 
+              }]
+            };
+          }
+
+          if (lead_id) params.lead_id = lead_id;
+          if (email) params.email = email;
+
+          const result = await this.callCloseAPI('contact', params);
+          
+          return {
+            content: [{ 
+              type: "text", 
+              text: `Found ${result.data?.length || 0} contacts:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{ 
+              type: "text", 
+              text: `Error retrieving contacts: ${error.message}` 
             }]
           };
         }
@@ -579,62 +436,6 @@ export class MyMCP extends McpAgent {
       issues: [],
       last_checked: new Date().toISOString()
     };
-  }
-
-  private generateRenewalRecommendation(policy: any, claims: any[]): any {
-    const claimsCount = claims ? claims.length : 0;
-    return {
-      action: claimsCount > 2 ? "review" : "retain",
-      confidence: claimsCount > 2 ? 0.65 : 0.85,
-      reasons: claimsCount > 2 ? ["High claims frequency"] : ["Good claims history"],
-      suggested_adjustments: []
-    };
-  }
-
-  private generateClaimsSummary(claims: any[]): any {
-    return {
-      total_claims: claims.length,
-      total_amount: claims.reduce((sum, c) => sum + (c.amount || 0), 0),
-      avg_amount: claims.length > 0 ? claims.reduce((sum, c) => sum + (c.amount || 0), 0) / claims.length : 0,
-      open_claims: claims.filter(c => c.status === 'open').length,
-      closed_claims: claims.filter(c => c.status === 'closed').length
-    };
-  }
-
-  private groupClaimsBy(claims: any[], field: string): any {
-    return claims.reduce((groups, claim) => {
-      const key = claim[field] || 'unknown';
-      if (!groups[key]) groups[key] = { count: 0, total_amount: 0 };
-      groups[key].count++;
-      groups[key].total_amount += claim.amount || 0;
-      return groups;
-    }, {});
-  }
-
-  private generateClaimsActionItems(claims: any[]): any[] {
-    const actionItems = [];
-    
-    const oldOpenClaims = claims.filter(c => 
-      c.status === 'open' && 
-      new Date(c.date_created) < new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    );
-    
-    if (oldOpenClaims.length > 0) {
-      actionItems.push({
-        priority: "high",
-        action: "Review old open claims",
-        count: oldOpenClaims.length
-      });
-    }
-    
-    return actionItems;
-  }
-
-  private calculateLeadScore(lead: any, opportunities: any[]): number {
-    let score = 5;
-    if (opportunities.length > 0) score += 2;
-    if (lead.contacts && lead.contacts.length > 1) score += 1;
-    return Math.min(Math.max(score, 1), 10);
   }
 
   // API Helper Methods
@@ -735,3 +536,74 @@ export class MyMCP extends McpAgent {
     return await response.json();
   }
 }
+
+// ES Module Default Export
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    
+    // Handle CORS preflight requests
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Accept',
+        },
+      });
+    }
+
+    // Handle SSE endpoint for MCP
+    if (url.pathname === '/sse' || url.pathname.startsWith('/sse/')) {
+      try {
+        const mcpServer = new MyMCP();
+        // Pass environment to the MCP server
+        mcpServer.props = { env };
+        
+        return mcpServer.serveSSE('/sse').fetch(request, env, ctx);
+      } catch (error) {
+        console.error("Error handling SSE request:", error);
+        return new Response("Internal Server Error", { 
+          status: 500,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+          }
+        });
+      }
+    }
+
+    // Handle health check endpoint
+    if (url.pathname === '/' || url.pathname === '/health') {
+      return new Response(JSON.stringify({
+        name: "Insurance MCP Server",
+        version: "1.0.0",
+        status: "healthy",
+        mcp_endpoint: "/sse",
+        tools: [
+          "get_customer_profile",
+          "search_customers_advanced",
+          "get_policy_details",
+          "get_nowcerts_policies",
+          "get_nowcerts_customers",
+          "get_close_leads",
+          "get_close_contacts"
+        ],
+        usage: "Connect MCP clients to: /sse endpoint"
+      }), {
+        status: 200,
+        headers: { 
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        }
+      });
+    }
+
+    return new Response("Not Found - Use /sse for MCP connections", { 
+      status: 404,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      }
+    });
+  },
+};
