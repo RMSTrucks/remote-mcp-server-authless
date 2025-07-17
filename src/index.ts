@@ -4,7 +4,8 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 interface Env {
-  NOWCERTS_API_KEY: string;
+  NOWCERTS_ACCESS_TOKEN: string;
+  NOWCERTS_REFRESH_TOKEN: string;
   CLOSE_API_KEY: string;
 }
 
@@ -249,10 +250,10 @@ export class InsuranceMCP extends McpAgent {
     );
   }
 
-  // Helper method to call NowCerts API
+  // Helper method to call NowCerts API with token management
   private async callNowCertsAPI(endpoint: string, params: any) {
-    if (!this.env.NOWCERTS_API_KEY) {
-      throw new Error("NOWCERTS_API_KEY not configured");
+    if (!this.env.NOWCERTS_ACCESS_TOKEN) {
+      throw new Error("NOWCERTS_ACCESS_TOKEN not configured");
     }
 
     // Build query string
@@ -265,14 +266,60 @@ export class InsuranceMCP extends McpAgent {
 
     const url = `https://api.nowcerts.com/v1/${endpoint}?${queryParams.toString()}`;
     
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${this.env.NOWCERTS_API_KEY}`,
+        'Authorization': `Bearer ${this.env.NOWCERTS_ACCESS_TOKEN}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       }
     });
+
+    // If token is expired (401), try to refresh it
+    if (response.status === 401 && this.env.NOWCERTS_REFRESH_TOKEN) {
+      console.log('NowCerts access token expired, attempting refresh...');
+      
+      try {
+        const refreshResponse = await fetch('https://api.nowcerts.com/v1/auth/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            refresh_token: this.env.NOWCERTS_REFRESH_TOKEN
+          })
+        });
+
+        if (refreshResponse.ok) {
+          const refreshData = await refreshResponse.json();
+          
+          // Retry the original request with the new token
+          response = await fetch(url, {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${refreshData.access_token}`,
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            }
+          });
+          
+          // Log the new tokens for manual update
+          console.log('⚠️  NowCerts tokens refreshed! Please update in Cloudflare dashboard:');
+          console.log(`New Access Token: ${refreshData.access_token}`);
+          console.log(`New Refresh Token: ${refreshData.refresh_token || 'Same as before'}`);
+        } else {
+          throw new Error(`Refresh failed: ${refreshResponse.statusText}`);
+        }
+      } catch (refreshError) {
+        console.error('Token refresh failed:', refreshError);
+        throw new Error(`NowCerts token expired and refresh failed. Please check token expiration dates:
+        - Access Token expires: 16-Aug-25
+        - Refresh Token expires: 15-Sep-25
+        
+        If both are expired, please log into NowCerts to get new tokens.`);
+      }
+    }
 
     if (!response.ok) {
       throw new Error(`NowCerts API error: ${response.status} ${response.statusText}`);
