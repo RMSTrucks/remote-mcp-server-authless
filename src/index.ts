@@ -1,6 +1,10 @@
-// src/index.ts - Fixed Insurance MCP Server (Resolves 500 Error)
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+// src/index.ts - Raw MCP Server (No Durable Objects)
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 interface Env {
@@ -9,243 +13,340 @@ interface Env {
   CLOSE_API_KEY: string;
 }
 
-export class MyMCP extends McpAgent {
-  server = new McpServer({ 
-    name: "Insurance Agency MCP Server", 
-    version: "1.0.0" 
-  });
+class InsuranceMCPServer {
+  private server: Server;
+  private env: Env;
 
-  async init() {
-    // ==== BASIC WORKING TOOLS FIRST ====
-    
-    this.server.tool(
-      "test_connection",
-      "Test the MCP server connection and environment setup",
+  constructor(env: Env) {
+    this.env = env;
+    this.server = new Server(
       {
-        include_env_check: z.boolean().optional().describe("Check if environment variables are configured")
+        name: "Insurance Agency MCP Server",
+        version: "1.0.0",
       },
-      async ({ include_env_check = true }) => {
-        try {
-          const status = {
-            server_status: "running",
-            timestamp: new Date().toISOString(),
-            environment_check: null
-          };
-
-          if (include_env_check) {
-            status.environment_check = {
-              nowcerts_token_configured: !!this.props?.env?.NOWCERTS_ACCESS_TOKEN,
-              close_api_configured: !!this.props?.env?.CLOSE_API_KEY,
-              refresh_token_configured: !!this.props?.env?.NOWCERTS_REFRESH_TOKEN
-            };
-          }
-
-          return {
-            content: [{ 
-              type: "text", 
-              text: `MCP Server Connection Test:\n\n${JSON.stringify(status, null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Connection test failed: ${error.message}` 
-            }]
-          };
-        }
+      {
+        capabilities: {
+          tools: {},
+        },
       }
     );
 
-    this.server.tool(
-      "get_nowcerts_customers",
-      "Get customer details from NowCerts (simplified version)",
-      {
-        customer_id: z.string().optional().describe("Specific customer ID to retrieve"),
-        limit: z.number().optional().describe("Maximum number of customers to return (default: 5, max: 10)")
-      },
-      async ({ customer_id, limit }) => {
-        try {
-          // Check if we have the required token
-          if (!this.props?.env?.NOWCERTS_ACCESS_TOKEN) {
-            return {
-              content: [{ 
-                type: "text", 
-                text: "Error: NOWCERTS_ACCESS_TOKEN not configured. Please add it in Cloudflare Dashboard → Settings → Variables and Secrets." 
-              }]
-            };
-          }
-
-          const result = await this.callNowCertsAPI('customers', {
-            customer_id,
-            limit: Math.min(limit || 5, 10)
-          });
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Found ${result.data?.length || 0} customers:\n\n${JSON.stringify(result.data || [], null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error retrieving customers: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
-    this.server.tool(
-      "get_nowcerts_policies",
-      "Retrieve policy information from NowCerts (simplified version)",
-      {
-        customer_id: z.string().optional().describe("Customer ID to filter policies"),
-        policy_number: z.string().optional().describe("Specific policy number to retrieve"),
-        limit: z.number().optional().describe("Maximum number of policies to return (default: 5, max: 10)")
-      },
-      async ({ customer_id, policy_number, limit }) => {
-        try {
-          if (!this.props?.env?.NOWCERTS_ACCESS_TOKEN) {
-            return {
-              content: [{ 
-                type: "text", 
-                text: "Error: NOWCERTS_ACCESS_TOKEN not configured. Please add it in Cloudflare Dashboard." 
-              }]
-            };
-          }
-
-          const result = await this.callNowCertsAPI('policies', {
-            customer_id,
-            policy_number,
-            limit: Math.min(limit || 5, 10)
-          });
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Found ${result.data?.length || 0} policies:\n\n${JSON.stringify(result.data || [], null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error retrieving policies: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
-    this.server.tool(
-      "get_close_leads",
-      "Retrieve lead information from Close CRM (simplified version)",
-      {
-        lead_id: z.string().optional().describe("Specific lead ID to retrieve"),
-        limit: z.number().optional().describe("Maximum number of leads to return (default: 5, max: 10)")
-      },
-      async ({ lead_id, limit }) => {
-        try {
-          if (!this.props?.env?.CLOSE_API_KEY) {
-            return {
-              content: [{ 
-                type: "text", 
-                text: "Error: CLOSE_API_KEY not configured. Please add it in Cloudflare Dashboard → Settings → Variables and Secrets." 
-              }]
-            };
-          }
-
-          if (lead_id) {
-            const result = await this.callCloseAPI(`lead/${lead_id}`, {});
-            return {
-              content: [{ 
-                type: "text", 
-                text: `Lead details:\n\n${JSON.stringify(result, null, 2)}` 
-              }]
-            };
-          }
-
-          const result = await this.callCloseAPI('lead', {
-            _limit: Math.min(limit || 5, 10)
-          });
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Found ${result.data?.length || 0} leads:\n\n${JSON.stringify(result.data || [], null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error retrieving leads: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
-
-    this.server.tool(
-      "get_close_contacts",
-      "Get contact details from Close CRM (simplified version)",
-      {
-        contact_id: z.string().optional().describe("Specific contact ID to retrieve"),
-        lead_id: z.string().optional().describe("Lead ID to get contacts for"),
-        limit: z.number().optional().describe("Maximum number of contacts to return (default: 5, max: 10)")
-      },
-      async ({ contact_id, lead_id, limit }) => {
-        try {
-          if (!this.props?.env?.CLOSE_API_KEY) {
-            return {
-              content: [{ 
-                type: "text", 
-                text: "Error: CLOSE_API_KEY not configured. Please add it in Cloudflare Dashboard." 
-              }]
-            };
-          }
-
-          if (contact_id) {
-            const result = await this.callCloseAPI(`contact/${contact_id}`, {});
-            return {
-              content: [{ 
-                type: "text", 
-                text: `Contact details:\n\n${JSON.stringify(result, null, 2)}` 
-              }]
-            };
-          }
-
-          const params: any = {
-            _limit: Math.min(limit || 5, 10)
-          };
-          if (lead_id) params.lead_id = lead_id;
-
-          const result = await this.callCloseAPI('contact', params);
-          
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Found ${result.data?.length || 0} contacts:\n\n${JSON.stringify(result.data || [], null, 2)}` 
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{ 
-              type: "text", 
-              text: `Error retrieving contacts: ${error.message}` 
-            }]
-          };
-        }
-      }
-    );
+    this.setupHandlers();
   }
 
-  // API Helper Methods with better error handling
+  private setupHandlers() {
+    // List available tools
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: "test_connection",
+            description: "Test the MCP server connection and environment setup",
+            inputSchema: {
+              type: "object",
+              properties: {
+                include_env_check: {
+                  type: "boolean",
+                  description: "Check if environment variables are configured"
+                }
+              }
+            }
+          },
+          {
+            name: "get_nowcerts_customers",
+            description: "Get customer details from NowCerts",
+            inputSchema: {
+              type: "object",
+              properties: {
+                customer_id: {
+                  type: "string",
+                  description: "Specific customer ID to retrieve"
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of customers to return (default: 5, max: 10)"
+                }
+              }
+            }
+          },
+          {
+            name: "get_nowcerts_policies",
+            description: "Retrieve policy information from NowCerts",
+            inputSchema: {
+              type: "object",
+              properties: {
+                customer_id: {
+                  type: "string",
+                  description: "Customer ID to filter policies"
+                },
+                policy_number: {
+                  type: "string",
+                  description: "Specific policy number to retrieve"
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of policies to return (default: 5, max: 10)"
+                }
+              }
+            }
+          },
+          {
+            name: "get_close_leads",
+            description: "Retrieve lead information from Close CRM",
+            inputSchema: {
+              type: "object",
+              properties: {
+                lead_id: {
+                  type: "string",
+                  description: "Specific lead ID to retrieve"
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of leads to return (default: 5, max: 10)"
+                }
+              }
+            }
+          },
+          {
+            name: "get_close_contacts",
+            description: "Get contact details from Close CRM",
+            inputSchema: {
+              type: "object",
+              properties: {
+                contact_id: {
+                  type: "string",
+                  description: "Specific contact ID to retrieve"
+                },
+                lead_id: {
+                  type: "string",
+                  description: "Lead ID to get contacts for"
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of contacts to return (default: 5, max: 10)"
+                }
+              }
+            }
+          }
+        ]
+      };
+    });
+
+    // Handle tool calls
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      try {
+        switch (name) {
+          case "test_connection":
+            return await this.handleTestConnection(args);
+          case "get_nowcerts_customers":
+            return await this.handleGetNowCertsCustomers(args);
+          case "get_nowcerts_policies":
+            return await this.handleGetNowCertsPolicies(args);
+          case "get_close_leads":
+            return await this.handleGetCloseLeads(args);
+          case "get_close_contacts":
+            return await this.handleGetCloseContacts(args);
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+      } catch (error) {
+        console.error(`Error handling tool ${name}:`, error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`
+            }
+          ],
+          isError: true
+        };
+      }
+    });
+  }
+
+  private async handleTestConnection(args: any) {
+    try {
+      const status = {
+        server_status: "running",
+        timestamp: new Date().toISOString(),
+        environment_check: {
+          nowcerts_token_configured: !!this.env.NOWCERTS_ACCESS_TOKEN,
+          close_api_configured: !!this.env.CLOSE_API_KEY,
+          refresh_token_configured: !!this.env.NOWCERTS_REFRESH_TOKEN
+        }
+      };
+
+      return {
+        content: [{ 
+          type: "text", 
+          text: `MCP Server Connection Test:\n\n${JSON.stringify(status, null, 2)}` 
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Connection test failed: ${error.message}` 
+        }]
+      };
+    }
+  }
+
+  private async handleGetNowCertsCustomers(args: any) {
+    try {
+      if (!this.env.NOWCERTS_ACCESS_TOKEN) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: "Error: NOWCERTS_ACCESS_TOKEN not configured. Please add it in Cloudflare Dashboard → Settings → Variables and Secrets." 
+          }]
+        };
+      }
+
+      const result = await this.callNowCertsAPI('customers', {
+        customer_id: args.customer_id,
+        limit: Math.min(args.limit || 5, 10)
+      });
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Found ${result.data?.length || 0} customers:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Error retrieving customers: ${error.message}` 
+        }]
+      };
+    }
+  }
+
+  private async handleGetNowCertsPolicies(args: any) {
+    try {
+      if (!this.env.NOWCERTS_ACCESS_TOKEN) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: "Error: NOWCERTS_ACCESS_TOKEN not configured. Please add it in Cloudflare Dashboard." 
+          }]
+        };
+      }
+
+      const result = await this.callNowCertsAPI('policies', {
+        customer_id: args.customer_id,
+        policy_number: args.policy_number,
+        limit: Math.min(args.limit || 5, 10)
+      });
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Found ${result.data?.length || 0} policies:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Error retrieving policies: ${error.message}` 
+        }]
+      };
+    }
+  }
+
+  private async handleGetCloseLeads(args: any) {
+    try {
+      if (!this.env.CLOSE_API_KEY) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: "Error: CLOSE_API_KEY not configured. Please add it in Cloudflare Dashboard → Settings → Variables and Secrets." 
+          }]
+        };
+      }
+
+      if (args.lead_id) {
+        const result = await this.callCloseAPI(`lead/${args.lead_id}`, {});
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Lead details:\n\n${JSON.stringify(result, null, 2)}` 
+          }]
+        };
+      }
+
+      const result = await this.callCloseAPI('lead', {
+        _limit: Math.min(args.limit || 5, 10)
+      });
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Found ${result.data?.length || 0} leads:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Error retrieving leads: ${error.message}` 
+        }]
+      };
+    }
+  }
+
+  private async handleGetCloseContacts(args: any) {
+    try {
+      if (!this.env.CLOSE_API_KEY) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: "Error: CLOSE_API_KEY not configured. Please add it in Cloudflare Dashboard." 
+          }]
+        };
+      }
+
+      if (args.contact_id) {
+        const result = await this.callCloseAPI(`contact/${args.contact_id}`, {});
+        return {
+          content: [{ 
+            type: "text", 
+            text: `Contact details:\n\n${JSON.stringify(result, null, 2)}` 
+          }]
+        };
+      }
+
+      const params: any = {
+        _limit: Math.min(args.limit || 5, 10)
+      };
+      if (args.lead_id) params.lead_id = args.lead_id;
+
+      const result = await this.callCloseAPI('contact', params);
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Found ${result.data?.length || 0} contacts:\n\n${JSON.stringify(result.data || [], null, 2)}` 
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: `Error retrieving contacts: ${error.message}` 
+        }]
+      };
+    }
+  }
+
+  // API Helper Methods
   private async callNowCertsAPI(endpoint: string, params: any) {
-    if (!this.props?.env?.NOWCERTS_ACCESS_TOKEN) {
+    if (!this.env.NOWCERTS_ACCESS_TOKEN) {
       throw new Error("NOWCERTS_ACCESS_TOKEN not configured");
     }
 
@@ -263,13 +364,13 @@ export class MyMCP extends McpAgent {
     let response = await fetch(url, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${this.props.env.NOWCERTS_ACCESS_TOKEN}`,
+        'Authorization': `Bearer ${this.env.NOWCERTS_ACCESS_TOKEN}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       }
     });
 
-    if (response.status === 401 && this.props.env.NOWCERTS_REFRESH_TOKEN) {
+    if (response.status === 401 && this.env.NOWCERTS_REFRESH_TOKEN) {
       console.log('NowCerts access token expired, attempting refresh...');
       
       try {
@@ -280,7 +381,7 @@ export class MyMCP extends McpAgent {
             'Accept': 'application/json'
           },
           body: JSON.stringify({
-            refresh_token: this.props.env.NOWCERTS_REFRESH_TOKEN
+            refresh_token: this.env.NOWCERTS_REFRESH_TOKEN
           })
         });
 
@@ -315,7 +416,7 @@ export class MyMCP extends McpAgent {
   }
 
   private async callCloseAPI(endpoint: string, params: any) {
-    if (!this.props?.env?.CLOSE_API_KEY) {
+    if (!this.env.CLOSE_API_KEY) {
       throw new Error("CLOSE_API_KEY not configured");
     }
 
@@ -333,7 +434,7 @@ export class MyMCP extends McpAgent {
     const response = await fetch(url, {
       method: 'GET',
       headers: {
-        'Authorization': `Basic ${btoa(this.props.env.CLOSE_API_KEY + ':')}`,
+        'Authorization': `Basic ${btoa(this.env.CLOSE_API_KEY + ':')}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       }
@@ -346,9 +447,13 @@ export class MyMCP extends McpAgent {
 
     return await response.json();
   }
+
+  getServer() {
+    return this.server;
+  }
 }
 
-// Simplified ES Module Default Export with better error handling
+// ES Module Default Export
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -370,21 +475,12 @@ export default {
       try {
         console.log('Setting up MCP server for SSE connection...');
         
-        const mcpServer = new MyMCP();
+        const mcpServer = new InsuranceMCPServer(env);
+        const transport = new SSEServerTransport("/sse", request);
         
-        // Properly initialize the MCP server with environment
-        if (!mcpServer.props) {
-          mcpServer.props = {};
-        }
-        mcpServer.props.env = env;
+        await mcpServer.getServer().connect(transport);
         
-        console.log('Environment variables configured:', {
-          nowcerts: !!env.NOWCERTS_ACCESS_TOKEN,
-          close: !!env.CLOSE_API_KEY,
-          refresh: !!env.NOWCERTS_REFRESH_TOKEN
-        });
-        
-        return mcpServer.serveSSE('/sse').fetch(request, env, ctx);
+        return transport.response;
       } catch (error) {
         console.error("Error handling SSE request:", error);
         return new Response(JSON.stringify({
